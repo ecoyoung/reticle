@@ -26,6 +26,7 @@ import type {
   PooledBrowser,
   PooledContext,
   PooledMockRule,
+  PooledPageError,
   ScreenshotOptions,
 } from './pool-contract.js';
 import type { RealInputArgs, RealInputResult } from '@/portal/input/real-input.js';
@@ -40,6 +41,7 @@ export type {
   PooledDialog,
   PooledMockRule,
   PooledPage,
+  PooledPageError,
 } from './pool-contract.js';
 import {
   DEFAULT_LEASE_TTL_MS,
@@ -48,6 +50,7 @@ import {
   MAX_REMEMBERED_REAPED_LEASES,
   NO_HEADED_BROWSER,
   ORPHANED_LEASE_GRACE_MS,
+  navStatusOf,
   pageLoading,
   PoolAtCapacityError,
   type ActiveLease,
@@ -74,6 +77,7 @@ export class BrowserPool {
   readonly #now: () => number;
   readonly #ttl: number;
   readonly #zeroInstall: (() => string | undefined) | undefined;
+  readonly #onPageError: ((leaseId: string, error: PooledPageError) => void) | undefined;
   readonly #navTimeout: number;
 
   readonly #headless: BrowserSlot;
@@ -119,6 +123,7 @@ export class BrowserPool {
     this.#ttl = opts.leaseTtlMs ?? DEFAULT_LEASE_TTL_MS;
     this.#navTimeout = opts.navTimeoutMs ?? DEFAULT_NAV_TIMEOUT_MS;
     this.#zeroInstall = opts.zeroInstallScript;
+    this.#onPageError = opts.onPageError;
   }
 
   /** The TTL configured for leases — how long an untouched lease lives before the reaper reclaims it. */
@@ -680,6 +685,12 @@ export class BrowserPool {
         }
         void dialog.dismiss();
       });
+      // Same "listen before goto" reasoning again, and here it is the WHOLE point: an import-time
+      // throw lands during goto, before any SDK is injected to see it (#1966). Forwarded with the
+      // lease id — the session for this lease usually does not exist yet, so the sink buffers.
+      page.onPageError?.((error) => {
+        this.#onPageError?.(sessionId, error);
+      });
       const marker = leaseMarkerOf(url);
       if (marker?.session === sessionId) {
         await installLeaseMarker(page, sessionId, targetOriginOf(url), marker.project);
@@ -710,22 +721,7 @@ export class BrowserPool {
       // Foreground it: a page opened beside other tabs can start hidden (#1351). Best-effort — a tab
       // that stays hidden is reported by name at the lease, which failing here would lose.
       await page.bringToFront?.().catch(() => undefined);
-      let navStatus: number | undefined;
-      if (null !== navRes && 'object' === typeof navRes && 'status' in navRes) {
-        const s: unknown = (navRes as { status?: unknown }).status;
-        if ('function' === typeof s) {
-          try {
-            const code: unknown = s.call(navRes);
-            if ('number' === typeof code) {
-              navStatus = code;
-            }
-          } catch {
-            // ignore
-          }
-        } else if ('number' === typeof s) {
-          navStatus = s;
-        }
-      }
+      const navStatus = navStatusOf(navRes);
       this.#active.set(sessionId, {
         headed: slot.headed,
         context,
