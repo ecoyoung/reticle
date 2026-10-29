@@ -26,7 +26,6 @@ import type {
   PooledBrowser,
   PooledContext,
   PooledMockRule,
-  PooledPageError,
   ScreenshotOptions,
 } from './pool-contract.js';
 import type { RealInputArgs, RealInputResult } from '@/portal/input/real-input.js';
@@ -58,6 +57,11 @@ import {
   type BrowserSlot,
   type Lease,
 } from './pool-lease.js';
+import {
+  listenForPageErrors,
+  reportLeaseClosed,
+  type LeasePageErrorHooks,
+} from './lease-page-error.js';
 export {
   DEFAULT_LEASE_TTL_MS,
   NO_HEADED_BROWSER,
@@ -77,8 +81,7 @@ export class BrowserPool {
   readonly #now: () => number;
   readonly #ttl: number;
   readonly #zeroInstall: (() => string | undefined) | undefined;
-  readonly #onPageError: ((leaseId: string, error: PooledPageError) => void) | undefined;
-  readonly #onLeaseClosed: ((leaseId: string) => void) | undefined;
+  readonly #pageErrorHooks: LeasePageErrorHooks | undefined;
   readonly #navTimeout: number;
 
   readonly #headless: BrowserSlot;
@@ -124,8 +127,7 @@ export class BrowserPool {
     this.#ttl = opts.leaseTtlMs ?? DEFAULT_LEASE_TTL_MS;
     this.#navTimeout = opts.navTimeoutMs ?? DEFAULT_NAV_TIMEOUT_MS;
     this.#zeroInstall = opts.zeroInstallScript;
-    this.#onPageError = opts.onPageError;
-    this.#onLeaseClosed = opts.onLeaseClosed;
+    this.#pageErrorHooks = { onPageError: opts.onPageError, onLeaseClosed: opts.onLeaseClosed };
   }
 
   /** The TTL configured for leases — how long an untouched lease lives before the reaper reclaims it. */
@@ -687,12 +689,8 @@ export class BrowserPool {
         }
         void dialog.dismiss();
       });
-      // Same "listen before goto" reasoning again, and here it is the WHOLE point: an import-time
-      // throw lands during goto, before any SDK is injected to see it (#1966). Forwarded with the
-      // lease id — the session for this lease usually does not exist yet, so the sink buffers.
-      page.onPageError?.((error) => {
-        this.#onPageError?.(sessionId, error);
-      });
+      // Listener on BEFORE goto — an import-time throw lands during it (#1966).
+      listenForPageErrors(page, sessionId, this.#pageErrorHooks);
       const marker = leaseMarkerOf(url);
       if (marker?.session === sessionId) {
         await installLeaseMarker(page, sessionId, targetOriginOf(url), marker.project);
@@ -819,10 +817,7 @@ export class BrowserPool {
       return;
     } // already released or lost to a crash
     this.#active.delete(sessionId);
-    // A lease that never connected a session still leaves state with the wiring (the page-error
-    // buffer). Released, reaped or crashed, it is closed all the same — tell the wiring, which
-    // owns whether anything needs dropping.
-    this.#onLeaseClosed?.(sessionId);
+    reportLeaseClosed(this.#pageErrorHooks, sessionId);
     // Drop any alias pointing here, or the map grows for the life of the daemon and a later lease
     // reusing that registered name would resolve to a context that is already closed.
     for (const [registered, leaseId] of this.#aliases) {
