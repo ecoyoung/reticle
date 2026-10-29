@@ -67,6 +67,7 @@ export function createBrowserPool(
   headless: boolean,
   reader: InjectedConnect,
   onPageError?: (leaseId: string, error: PooledPageError) => void,
+  onLeaseClosed?: (leaseId: string) => void,
 ): BrowserPool {
   const maxContexts = resolveMaxContexts(process.env[ReticleEnv.MAX_CONTEXTS], cpus().length);
   const genSessionId = (): string =>
@@ -81,6 +82,7 @@ export function createBrowserPool(
     zeroInstallScript: zeroInstallLoader(reader),
     launchHeaded: playwrightLauncher({ headless: false }),
     ...(onPageError === undefined ? {} : { onPageError }),
+    ...(onLeaseClosed === undefined ? {} : { onLeaseClosed }),
   });
 }
 
@@ -106,6 +108,12 @@ export function attachPageErrorJournal(bridge: Bridge): PageErrorJournal {
     },
   });
   bridge.attachSessionCreate((session) => journal.onSessionCreate(session));
+  // The daemon runs for days; both of the journal's maps are keyed by things that end, so both
+  // endings are hooked. The bridge's end hook is additive — the durable journal's teardown runs too.
+  bridge.attachSessionEnd((session) => {
+    journal.onSessionEnd(session.id);
+    return Promise.resolve();
+  });
   return journal;
 }
 

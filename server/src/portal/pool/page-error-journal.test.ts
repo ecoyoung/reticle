@@ -136,6 +136,42 @@ describe('page errors the SDK never sees', () => {
     expect(events[0]?.data['message']).toBe('boom 2');
   });
 
+  it("drops a lease's buffer when the lease is released — a session that never connects must not leave it behind", async () => {
+    const state: { session: JournalableSession | undefined } = { session: undefined };
+    const journal = makePageErrorJournal({ resolveSession: () => state.session, sleep: immediate });
+    journal.onPoolPageError('lease-1', MODULE_ERROR);
+    journal.onLeaseClosed('lease-1');
+
+    // A session for the same lease connects LATER (a retry); nothing from the dead lease may
+    // flush into it.
+    state.session = fakeSession('sess-1', 'http://app.test/?__reticle_session=lease-1');
+    journal.onSessionCreate(state.session);
+    await flush();
+
+    expect(state.session.eventsSince(0)).toHaveLength(0);
+  });
+
+  it("forgets a session's identities when the session ends, so its dedupe memory does not outlive it", async () => {
+    const session = fakeSession('sess-1');
+    const journal = makePageErrorJournal({ resolveSession: () => session, sleep: immediate });
+    journal.onSessionCreate(session);
+    session.pushEvent({
+      t: 1,
+      type: EventType.ERROR_UNCAUGHT,
+      sessionId: 'sess-1',
+      data: { message: 'Uncaught Error: boom at module evaluation' },
+    });
+    journal.onSessionEnd('sess-1');
+
+    // The same throw arrives again through the pool after the end — a NEW session for the same
+    // app reuses the id space only by coincidence; the old memory must not suppress it.
+    journal.onPoolPageError('lease-1', MODULE_ERROR);
+    await flush();
+
+    const consoleEvents = session.eventsSince(0).filter((e) => e.type === EventType.CONSOLE_ERROR);
+    expect(consoleEvents).toHaveLength(1);
+  });
+
   it('reads one identity out of both the browser and the SDK spelling of the same throw', () => {
     expect(uncaughtIdentity('Uncaught Error: boom at module evaluation')).toBe(
       'boom at module evaluation',

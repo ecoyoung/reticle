@@ -78,6 +78,7 @@ export class BrowserPool {
   readonly #ttl: number;
   readonly #zeroInstall: (() => string | undefined) | undefined;
   readonly #onPageError: ((leaseId: string, error: PooledPageError) => void) | undefined;
+  readonly #onLeaseClosed: ((leaseId: string) => void) | undefined;
   readonly #navTimeout: number;
 
   readonly #headless: BrowserSlot;
@@ -124,6 +125,7 @@ export class BrowserPool {
     this.#navTimeout = opts.navTimeoutMs ?? DEFAULT_NAV_TIMEOUT_MS;
     this.#zeroInstall = opts.zeroInstallScript;
     this.#onPageError = opts.onPageError;
+    this.#onLeaseClosed = opts.onLeaseClosed;
   }
 
   /** The TTL configured for leases — how long an untouched lease lives before the reaper reclaims it. */
@@ -817,6 +819,10 @@ export class BrowserPool {
       return;
     } // already released or lost to a crash
     this.#active.delete(sessionId);
+    // A lease that never connected a session still leaves state with the wiring (the page-error
+    // buffer). Released, reaped or crashed, it is closed all the same — tell the wiring, which
+    // owns whether anything needs dropping.
+    this.#onLeaseClosed?.(sessionId);
     // Drop any alias pointing here, or the map grows for the life of the daemon and a later lease
     // reusing that registered name would resolve to a context that is already closed.
     for (const [registered, leaseId] of this.#aliases) {

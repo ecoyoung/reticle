@@ -11,6 +11,11 @@
  * yet, so errors buffer per lease and flush the moment the session connects
  * (`bridge.attachSessionCreate`). One already connected means the error is journaled at once.
  *
+ * The daemon runs for days, so both maps are told to forget: a lease that is released or reaped
+ * has its buffer dropped (`onLeaseClosed`), and a session that has ended has its dedupe memory
+ * dropped (`onSessionEnd`). Without those, every failed lease and every ended session leaves an
+ * entry behind forever.
+ *
  * Deduplication: when the SDK IS installed it reports the same throw as `error.uncaught` — with
  * the browser's `Uncaught ` prefix on the message, which Playwright's spelling lacks. Both
  * spellings fold into one identity (`uncaughtIdentity`), and whichever source is seen first
@@ -19,11 +24,8 @@
  * first, the SDK's right after — can still journal both; the SDK's own event is authoritative and
  * only the redundant second copy is cost, not wrong evidence.
  */
-import { EventType, RETICLE_URL_PARAM, type ReticleEvent } from '@reticlehq/core';
+import { CONSOLE_EVENT, EventType, RETICLE_URL_PARAM, type ReticleEvent } from '@reticlehq/core';
 import type { PooledPageError } from './pool-contract.js';
-
-/** The `kind` a server-observed page error carries, so an agent can tell it from a console.error call. */
-export const PAGE_ERROR_KIND = 'pageerror';
 
 /** How many errors wait per lease for a session that may never connect. Older ones give way. */
 const MAX_BUFFERED_PER_LEASE = 8;
@@ -49,6 +51,10 @@ export interface PageErrorJournal {
   onPoolPageError(leaseId: string, error: PooledPageError): void;
   /** The bridge hook — register with `bridge.attachSessionCreate`. */
   onSessionCreate(session: JournalableSession): void;
+  /** The pool's release hook — register with `BrowserPoolOptions.onLeaseClosed`. */
+  onLeaseClosed(leaseId: string): void;
+  /** The bridge hook — register with `bridge.attachSessionEnd`. */
+  onSessionEnd(sessionId: string): void;
 }
 
 /**
@@ -142,11 +148,13 @@ export function makePageErrorJournal(deps: {
       sessionId: session.id,
       data: {
         message: error.message,
-        kind: PAGE_ERROR_KIND,
+        kind: CONSOLE_EVENT.PAGE_ERROR,
         ...(error.stack === undefined ? {} : { stack: error.stack }),
         ...(source === undefined ? {} : { source }),
         ...(line === undefined ? {} : { line }),
-        ...(droppedCount === undefined ? {} : { droppedPageErrors: droppedCount }),
+        ...(droppedCount === undefined
+          ? {}
+          : { [CONSOLE_EVENT.DROPPED_PAGE_ERRORS]: droppedCount }),
       },
     });
   };
@@ -203,6 +211,18 @@ export function makePageErrorJournal(deps: {
       entry.errors.forEach((error, i) => {
         journalSafely(session, error, 0 === i && entry.dropped > 0 ? entry.dropped : undefined);
       });
+    },
+
+    // A lease that is released or reaped will never flush: its session already ended, or its page
+    // died before any SDK connected. The buffer has nowhere to go, so it goes away.
+    onLeaseClosed(leaseId) {
+      buffered.delete(leaseId);
+    },
+
+    // The dedupe memory belongs to one session's lifetime; an ended session's identities would
+    // otherwise suppress nothing real and grow for the life of the daemon.
+    onSessionEnd(sessionId) {
+      seen.delete(sessionId);
     },
   };
 }

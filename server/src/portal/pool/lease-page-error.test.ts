@@ -87,4 +87,18 @@ describe('forwarding uncaught page errors to the wiring', () => {
     expect(lease.sessionId).toContain('lease-');
     await lease.release();
   });
+
+  it('tells the wiring when a lease is released, so per-lease state can be dropped', async () => {
+    const onLeaseClosed = vi.fn();
+    const pool = new BrowserPool(launcher(), {
+      maxContexts: 2,
+      genSessionId: ids,
+      onLeaseClosed,
+    });
+    const lease = await pool.acquire('http://app.test/');
+
+    await lease.release();
+
+    expect(onLeaseClosed).toHaveBeenCalledWith(lease.sessionId);
+  });
 });

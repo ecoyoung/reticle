@@ -69,6 +69,12 @@ export interface BrowserPoolOptions {
    */
   onPageError?: (leaseId: string, error: PooledPageError) => void;
   /**
+   * Sink for lease release — manual release, the reaper, and a crash reclaim all funnel through
+   * it. Lets the wiring drop state it kept FOR that lease (the page-error buffer) instead of
+   * holding it for the life of the daemon. Optional: no sink, nothing to clean up.
+   */
+  onLeaseClosed?: (leaseId: string) => void;
+  /**
    * Launches a browser with a window, for a lease somebody wants to watch. Launched only when the
    * first headed lease is asked for. Absent: a headed lease is refused.
    */
